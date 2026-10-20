@@ -10,6 +10,7 @@ Run it on a schedule (cron, Task Scheduler, GitHub Actions) every 15-30 min.
 The first run only records what's currently published (no spam); later runs
 post anything new.
 """
+import argparse
 import json
 import os
 import sys
@@ -63,12 +64,33 @@ def build_embed(entry):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--latest",
+        type=int,
+        metavar="N",
+        help="Post the N most recent articles right now, ignoring saved state.",
+    )
+    args = parser.parse_args()
+
     if not WEBHOOK_URL:
         sys.exit("Set DISCORD_WEBHOOK_URL first.")
 
     feed = feedparser.parse(FEED_URL)
     if feed.bozo and not feed.entries:
         sys.exit(f"Could not read feed: {feed.bozo_exception}")
+
+    if args.latest:  # manual mode: grab the last N posts, don't touch saved state
+        batch = feed.entries[: min(args.latest, MAX_PER_RUN)]
+        for entry in reversed(batch):  # oldest first so newest lands at the bottom
+            r = requests.post(
+                WEBHOOK_URL,
+                json={"username": "RuneScape News", "embeds": [build_embed(entry)]},
+                timeout=15,
+            )
+            r.raise_for_status()
+        print(f"Posted the latest {len(batch)} article(s).")
+        return
 
     seen = load_seen()
     current_ids = {e.get("id") or e.link for e in feed.entries}
