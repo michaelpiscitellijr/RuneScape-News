@@ -11,10 +11,13 @@ The first run only records what's currently published (no spam); later runs
 post anything new.
 """
 import argparse
+import html
 import json
 import os
+import re
 import sys
 from pathlib import Path
+from urllib.parse import urljoin
 
 import feedparser
 import requests
@@ -37,6 +40,40 @@ def save_seen(seen):
     STATE_FILE.write_text(json.dumps(sorted(seen)))
 
 
+def find_image(entry):
+    """Best-effort: feed media fields, then <img> in the feed text, then the article's og:image."""
+    for key in ("media_content", "media_thumbnail"):
+        for m in entry.get(key) or []:
+            if m.get("url"):
+                return urljoin(entry.link, m["url"])
+    for enc in entry.get("enclosures") or []:
+        if enc.get("type", "").startswith("image") and enc.get("href"):
+            return urljoin(entry.link, enc["href"])
+    texts = [entry.get("summary", "")] + [c.get("value", "") for c in entry.get("content", [])]
+    for text in texts:
+        m = re.search(r"<img[^>]+src=[\"']([^\"']+)", text)
+        if m:
+            return urljoin(entry.link, html.unescape(m.group(1)))
+    try:  # fallback: read the article page's social-preview image
+        r = requests.get(
+            entry.link, timeout=15, headers={"User-Agent": "Mozilla/5.0 (news-webhook)"}
+        )
+        m = re.search(
+            r"<meta[^>]+property=[\"']og:image[\"'][^>]+content=[\"']([^\"']+)", r.text
+        ) or re.search(
+            r"<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+property=[\"']og:image[\"']", r.text
+        )
+        if m:
+            return urljoin(entry.link, html.unescape(m.group(1)))
+    except requests.RequestException:
+        pass
+    return None
+
+
+def clean(text):
+    return html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+
+
 def build_embed(entry):
     embed = {
         "title": entry.get("title", "RuneScape news")[:256],
@@ -44,9 +81,12 @@ def build_embed(entry):
         "color": EMBED_COLOR,
         "author": {"name": "RuneScape News"},
     }
-    summary = entry.get("summary", "")
+    summary = clean(entry.get("summary", ""))
     if summary:
         embed["description"] = summary[:300]
+    image = find_image(entry)
+    if image:
+        embed["image"] = {"url": image}
     tags = [t.get("term") for t in entry.get("tags", []) if t.get("term")]
     if tags:
         embed["footer"] = {"text": ", ".join(tags)[:100]}
